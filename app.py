@@ -570,6 +570,212 @@ class DashboardPage(ttk.Frame):
         return len(self.rows)
 
 
+class TablePage(ttk.Frame):
+    hint = "Select a row to edit it, or fill the fields to create a new record."
+
+    # Build the toolbar, table and record details panel for one table
+    def __init__(self, parent, app, name, title):
+        super().__init__(parent)
+        self.app = app
+        self.name = name
+        self.title = title
+        self.rows = []
+        self.shown = []
+        self.selected_id = None
+        self.widgets = {}
+        self.choices = {}
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, minsize=320)
+        self.rowconfigure(1, weight=1)
+
+        toolbar = ttk.Frame(self)
+        toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self.search = ttk.Entry(toolbar, width=32)
+        self.search.pack(side="left")
+        self.search.bind("<Return>", lambda e: self.apply_filter())
+        ttk.Button(toolbar, text="Search", style="Secondary.TButton", command=self.apply_filter).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Clear", style="Secondary.TButton", command=self.clear_search).pack(side="left", padx=(8, 0))
+        self.toolbar_right = ttk.Frame(toolbar)
+        self.toolbar_right.pack(side="right")
+        ttk.Button(self.toolbar_right, text="Refresh", style="Secondary.TButton",
+                   command=app.refresh_all).pack(side="right", padx=(8, 0))
+
+        frame, self.tree = make_table(self, TABLES[name]["columns"])
+        frame.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+
+        panel = tk.Frame(self, bg=WHITE, highlightthickness=1, highlightbackground=BORDER, padx=18, pady=16)
+        panel.grid(row=1, column=1, sticky="nsew")
+        panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
+        ttk.Label(panel, text="Record details", style="PanelTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(panel, text=self.hint, style="Hint.TLabel", wraplength=270,
+                  justify="left").grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        row = 2
+        for label, column, kind, option in TABLES[name]["fields"]:
+            ttk.Label(panel, text=label, style="Panel.TLabel").grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 2))
+            if kind in ("fk", "choice"):
+                widget = ttk.Combobox(panel, state="readonly", values=option if kind == "choice" else ())
+            else:
+                widget = ttk.Entry(panel)
+            widget.grid(row=row + 1, column=0, columnspan=2, sticky="ew")
+            self.widgets[label] = widget
+            row += 2
+        for n, (text, command, style) in enumerate(self.buttons()):
+            ttk.Button(panel, text=text, command=command, style=style).grid(
+                row=row + 1 + n // 2, column=n % 2, sticky="ew", padx=(0 if n % 2 == 0 else 4, 4 if n % 2 == 0 else 0),
+                pady=(16 if n < 2 else 8, 0))
+
+    # Buttons of the record details panel
+    def buttons(self):
+        return [("Add new", self.add, "TButton"), ("Save changes", self.save, "TButton"),
+                ("Delete selected", self.delete, "Danger.TButton"), ("Clear form", self.clear_form, "Secondary.TButton")]
+
+    # Reload the rows and the foreign-key combos, keeping current combo choices
+    def refresh(self):
+        self.rows = fetch(self.name)
+        for label, column, kind, option in TABLES[self.name]["fields"]:
+            if kind == "fk":
+                combo = self.widgets[label]
+                old = self.choice_id(label)
+                self.choices[label] = lookup(option)
+                combo["values"] = [r[1] for r in self.choices[label]]
+                self.set_choice(label, old)
+        self.apply_filter()
+
+    # Id behind the current text of a foreign-key combo
+    def choice_id(self, label):
+        index = self.widgets[label].current()
+        rows = self.choices.get(label, [])
+        return rows[index][0] if 0 <= index < len(rows) else None
+
+    # Show the combo text that belongs to an id
+    def set_choice(self, label, record_id):
+        text = next((r[1] for r in self.choices.get(label, []) if r[0] == record_id), "")
+        self.widgets[label].set(text)
+
+    # Show only the rows that contain the search text in any column
+    def apply_filter(self):
+        text = self.search.get().strip().lower()
+        self.shown = [r for r in self.rows if not text or any(text in str(v).lower() for v in r)]
+        fill_table(self.tree, self.shown)
+        self.selected_id = None
+        self.app.update_status()
+
+    # Clear the search box and show all rows
+    def clear_search(self):
+        self.search.delete(0, "end")
+        self.apply_filter()
+
+    # Number of rows shown in the table
+    def shown_count(self):
+        return len(self.shown)
+
+    # Load the selected row into the form
+    def on_select(self, event):
+        selection = self.tree.selection()
+        if not selection:
+            return
+        self.selected_id = self.shown[int(selection[0])][0]
+        record = get_record(self.name, self.selected_id)
+        for label, column, kind, option in TABLES[self.name]["fields"]:
+            widget = self.widgets[label]
+            if kind == "fk":
+                self.set_choice(label, record[column])
+            elif kind == "choice":
+                widget.set(record[column])
+            else:
+                widget.delete(0, "end")
+                widget.insert(0, record[column])
+
+    # Read the form as raw values keyed by field label
+    def form_values(self):
+        raw = {}
+        for label, column, kind, option in TABLES[self.name]["fields"]:
+            if kind == "fk":
+                raw[label] = self.choice_id(label) or ""
+            else:
+                raw[label] = self.widgets[label].get()
+        return raw
+
+    # Run a database action, show any rule warning, and refresh everything on success
+    def attempt(self, action, *args):
+        try:
+            action(*args)
+        except ValueError as e:
+            messagebox.showwarning("Not allowed", str(e))
+            return False
+        self.app.refresh_all()
+        return True
+
+    # Insert the form as a new record
+    def add(self):
+        if self.attempt(add_record, self.name, self.form_values()):
+            self.clear_form()
+
+    # Save the form over the selected record
+    def save(self):
+        if self.selected_id is None:
+            messagebox.showwarning("No selection", "Please select a row to save changes to.")
+            return
+        if self.attempt(update_record, self.name, self.selected_id, self.form_values()):
+            self.clear_form()
+
+    # Delete the selected record after confirmation
+    def delete(self):
+        if self.selected_id is None:
+            messagebox.showwarning("No selection", "Please select a row to delete.")
+            return
+        if messagebox.askyesno("Confirm delete", "Delete the selected record (ID " + str(self.selected_id) + ")?"):
+            if self.attempt(delete_record, self.name, self.selected_id):
+                self.clear_form()
+
+    # Empty the form and clear the table selection
+    def clear_form(self):
+        for widget in self.widgets.values():
+            if isinstance(widget, ttk.Combobox):
+                widget.set("")
+            else:
+                widget.delete(0, "end")
+        self.tree.selection_remove(self.tree.selection())
+        self.selected_id = None
+
+    # The first field of the form
+    def first_field(self):
+        return next(iter(self.widgets.values()))
+
+
+class IssuePage(TablePage):
+    hint = "Select a row to mark it returned or delete it, or fill the fields to issue equipment."
+
+    # Build the page and pre-fill today's date
+    def __init__(self, parent, app):
+        super().__init__(parent, app, "issue", "Issue / Return")
+        self.clear_form()
+
+    # Buttons of the issue panel
+    def buttons(self):
+        return [("Issue", self.add, "TButton"), ("Mark Returned", self.mark_returned, "TButton"),
+                ("Delete Record", self.delete, "Danger.TButton"), ("Clear form", self.clear_form, "Secondary.TButton")]
+
+    # Remember the selected issue record without loading it into the form
+    def on_select(self, event):
+        selection = self.tree.selection()
+        self.selected_id = self.shown[int(selection[0])][0] if selection else None
+
+    # Set the return date of the selected record to today
+    def mark_returned(self):
+        if self.selected_id is None:
+            messagebox.showwarning("No selection", "Please select an issue record to mark as returned.")
+            return
+        self.attempt(mark_returned, self.selected_id)
+
+    # Empty the form and put today's date in Issue Date
+    def clear_form(self):
+        super().clear_form()
+        self.widgets["Issue Date"].insert(0, date.today().isoformat())
+
+
 class App:
     # Build the window, sidebar, content area and status bar
     def __init__(self, root):
@@ -637,7 +843,13 @@ class App:
 
     # The screens in sidebar order
     def page_list(self):
-        return [("dashboard", DashboardPage, ())]
+        return [("dashboard", DashboardPage, ()),
+                ("categories", TablePage, ("categories", "Categories")),
+                ("equipment", TablePage, ("equipment", "Equipment")),
+                ("members", TablePage, ("members", "Members")),
+                ("issue", IssuePage, ()),
+                ("maintenance", TablePage, ("maintenance", "Maintenance")),
+                ("fines", TablePage, ("fines", "Fines"))]
 
     # Switch to a screen, optionally with an empty form ready for a new record
     def show(self, key, new=False):
