@@ -1,10 +1,39 @@
 import csv
 import os
 import sqlite3
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from tkinter import font as tkfont
 from datetime import date, datetime
 
 DB = "sports.db"
 last_sql = ""
+
+BG = "#F7F5F0"
+WHITE = "#FFFFFF"
+TEXT = "#2B2B2B"
+MUTED = "#6B6B6B"
+GREEN = "#2E7D5B"
+GREEN_HOVER = "#256B4C"
+SIDEBAR = "#1F3A2E"
+SIDEBAR_HOVER = "#294C3C"
+SIDEBAR_TEXT = "#F2EFE8"
+SIDEBAR_MUTED = "#A9BDB2"
+GREY_BUTTON = "#ECEAE4"
+GREY_HOVER = "#DEDBD3"
+RED_BUTTON = "#FBE3E3"
+RED_HOVER = "#F5CFCF"
+RED_TEXT = "#9B2C2C"
+HEADING = "#E6EEE9"
+SELECT = "#DCEFE4"
+BORDER = "#DAD6CD"
+ZEBRA = "#FAF9F6"
+STATUS_COLOURS = {
+    "Available": "#E6F4EA", "Returned": "#E6F4EA", "Completed": "#E6F4EA", "Paid": "#E6F4EA",
+    "Issued": "#FFF3D6", "In Progress": "#FFF3D6", "Pending": "#FFF3D6",
+    "Overdue": "#F8DADA", "All Issued": "#F8DADA",
+    "Under Repair": "#E4E4E4",
+}
 
 TODAY = "date('now', 'localtime')"
 DUE = "date(i.issue_date, '+' || i.days_allowed || ' days')"
@@ -393,5 +422,252 @@ def import_csv(name, path):
     return imported, skipped, reason
 
 
+# Apply the clam theme with the project colours and fonts
+def setup_theme(root):
+    family = "Segoe UI" if "Segoe UI" in tkfont.families() else "Arial"
+    for name in ("TkDefaultFont", "TkTextFont", "TkHeadingFont"):
+        tkfont.nametofont(name).configure(family=family, size=10)
+    root.option_add("*TCombobox*Listbox.background", WHITE)
+    root.option_add("*TCombobox*Listbox.foreground", TEXT)
+    root.option_add("*TCombobox*Listbox.selectBackground", SELECT)
+    root.option_add("*TCombobox*Listbox.selectForeground", TEXT)
+
+    s = ttk.Style()
+    s.theme_use("clam")
+    s.configure(".", background=BG, foreground=TEXT, font=(family, 10), focuscolor=BORDER)
+    s.configure("TFrame", background=BG)
+    s.configure("Panel.TFrame", background=WHITE)
+    s.configure("TLabel", background=BG, foreground=TEXT)
+    s.configure("Panel.TLabel", background=WHITE)
+    s.configure("PanelTitle.TLabel", background=WHITE, font=(family, 12, "bold"))
+    s.configure("Hint.TLabel", background=WHITE, foreground=MUTED, font=(family, 9))
+    s.configure("Title.TLabel", font=(family, 20, "bold"))
+    s.configure("Section.TLabel", font=(family, 12, "bold"))
+    s.configure("Owner.TLabel", foreground=GREEN, font=(family, 10, "bold"))
+
+    def button(name, bg, fg, hover):
+        s.configure(name, background=bg, foreground=fg, borderwidth=0, relief="flat", padding=(14, 7),
+                    bordercolor=bg, lightcolor=bg, darkcolor=bg, focuscolor=bg)
+        s.map(name, background=[("active", hover), ("pressed", hover)],
+              lightcolor=[("active", hover)], darkcolor=[("active", hover)], bordercolor=[("active", hover)])
+
+    button("TButton", GREEN, WHITE, GREEN_HOVER)
+    button("Secondary.TButton", GREY_BUTTON, TEXT, GREY_HOVER)
+    button("Danger.TButton", RED_BUTTON, RED_TEXT, RED_HOVER)
+    button("Nav.TButton", SIDEBAR, SIDEBAR_TEXT, SIDEBAR_HOVER)
+    button("NavActive.TButton", GREEN, WHITE, GREEN)
+    for name in ("Nav.TButton", "NavActive.TButton"):
+        s.configure(name, anchor="w", padding=(22, 10), font=(family, 10))
+
+    for widget in ("TEntry", "TCombobox"):
+        s.configure(widget, fieldbackground=WHITE, foreground=TEXT, bordercolor=BORDER, lightcolor=WHITE,
+                    darkcolor=WHITE, selectbackground=SELECT, selectforeground=TEXT, padding=5,
+                    insertcolor=TEXT)
+        s.map(widget, bordercolor=[("focus", GREEN)], lightcolor=[("focus", GREEN)])
+    s.configure("TCombobox", background=WHITE, arrowcolor=TEXT)
+    s.map("TCombobox", fieldbackground=[("readonly", WHITE)], selectbackground=[("readonly", WHITE)],
+          selectforeground=[("readonly", TEXT)], background=[("active", SELECT)])
+
+    s.configure("Treeview", background=WHITE, fieldbackground=WHITE, foreground=TEXT, rowheight=28,
+                bordercolor=BORDER, lightcolor=WHITE, darkcolor=WHITE)
+    s.map("Treeview", background=[("selected", SELECT)], foreground=[("selected", TEXT)])
+    s.configure("Treeview.Heading", background=HEADING, foreground=TEXT, font=(family, 10, "bold"),
+                relief="flat", bordercolor=BORDER, lightcolor=HEADING, darkcolor=HEADING, padding=(6, 5))
+    s.map("Treeview.Heading", background=[("active", SELECT)])
+    for bar in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        s.configure(bar, background=GREY_BUTTON, troughcolor=BG, bordercolor=BG, lightcolor=GREY_BUTTON,
+                    darkcolor=GREY_BUTTON, arrowcolor=MUTED)
+        s.map(bar, background=[("active", GREY_HOVER)])
+    return family
+
+
+# Create a table with both scrollbars and status colour tags inside a frame
+def make_table(parent, columns):
+    frame = ttk.Frame(parent)
+    frame.columnconfigure(0, weight=1)
+    frame.rowconfigure(0, weight=1)
+    tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+    vbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    hbar = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    vbar.grid(row=0, column=1, sticky="ns")
+    hbar.grid(row=1, column=0, sticky="ew")
+    set_columns(tree, columns)
+    for tag, colour in STATUS_COLOURS.items():
+        tree.tag_configure(tag, background=colour)
+    tree.tag_configure("odd", background=ZEBRA)
+    return frame, tree
+
+
+# Set the headings and widths of a table
+def set_columns(tree, columns):
+    tree["columns"] = columns
+    for col in columns:
+        tree.heading(col, text=col, anchor="w")
+        tree.column(col, width=60 if col == "ID" else 130, minwidth=50, anchor="w", stretch=True)
+
+
+# Fill a table with rows, colouring each row by its Status column if there is one
+def fill_table(tree, rows):
+    tree.delete(*tree.get_children())
+    columns = list(tree["columns"])
+    status = columns.index("Status") if "Status" in columns else None
+    for n, row in enumerate(rows):
+        shown = tuple(f"{v:.2f}" if isinstance(v, float) else ("" if v is None else v) for v in row)
+        tag = row[status] if status is not None else ("odd" if n % 2 else "")
+        tree.insert("", "end", iid=str(n), values=shown, tags=(tag,))
+
+
+class DashboardPage(ttk.Frame):
+    title = "Dashboard"
+
+    # Build the stat cards, quick actions and overdue table
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(4, weight=1)
+
+        cards = ttk.Frame(self)
+        cards.grid(row=0, column=0, sticky="ew")
+        self.numbers = {}
+        for col, (key, label, colour) in enumerate((
+                ("equipment", "Equipment Items", GREEN), ("members", "Members", "#3F6B4F"),
+                ("issued", "Currently Issued (units)", "#B7791F"), ("overdue", "Overdue Returns", "#B23B3B"),
+                ("repair", "Under Repair", MUTED), ("fines", "Pending Fines (total amount)", "#A35A12"))):
+            cards.columnconfigure(col, weight=1, uniform="card")
+            card = tk.Frame(cards, bg=WHITE, highlightthickness=1, highlightbackground=BORDER)
+            card.grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 12, 0))
+            self.numbers[key] = tk.Label(card, bg=WHITE, fg=colour, font=(app.family, 26, "bold"))
+            self.numbers[key].pack(anchor="w", padx=16, pady=(14, 0))
+            tk.Label(card, text=label, bg=WHITE, fg=MUTED, font=(app.family, 10)).pack(anchor="w", padx=16, pady=(0, 14))
+
+        ttk.Label(self, text="Quick actions", style="Section.TLabel").grid(row=1, column=0, sticky="w", pady=(22, 8))
+        actions = ttk.Frame(self)
+        actions.grid(row=2, column=0, sticky="w")
+        for text, page in (("Add equipment", "equipment"), ("Register a member", "members"),
+                           ("Issue equipment", "issue"), ("Record maintenance", "maintenance")):
+            ttk.Button(actions, text=text, command=lambda p=page: app.show(p, new=True)).pack(side="left", padx=(0, 10))
+
+        ttk.Label(self, text="Overdue returns", style="Section.TLabel").grid(row=3, column=0, sticky="w", pady=(22, 8))
+        frame, self.tree = make_table(self, ("Equipment", "Member", "Phone", "Due Date", "Days Late", "Qty"))
+        frame.grid(row=4, column=0, sticky="nsew")
+        self.rows = []
+
+    # Reload the card numbers and the overdue table
+    def refresh(self):
+        stats = dashboard_stats()
+        for key, label in self.numbers.items():
+            label.configure(text=("₹ %.2f" % stats[key]) if key == "fines" else str(stats[key]))
+        self.rows = fetch_overdue()
+        fill_table(self.tree, self.rows)
+        for iid in self.tree.get_children():
+            self.tree.item(iid, tags=("Overdue",))
+
+    # Number of rows shown in the table
+    def shown_count(self):
+        return len(self.rows)
+
+
+class App:
+    # Build the window, sidebar, content area and status bar
+    def __init__(self, root):
+        self.root = root
+        root.title("Sports Equipment Management System")
+        try:
+            root.state("zoomed")
+        except tk.TclError:
+            root.geometry("1280x720")
+        root.minsize(1000, 600)
+        root.configure(bg=BG)
+        self.family = setup_theme(root)
+        root.columnconfigure(1, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        self.sidebar = tk.Frame(root, bg=SIDEBAR, width=210)
+        self.sidebar.grid(row=0, column=0, sticky="ns")
+        self.sidebar.grid_propagate(False)
+        self.sidebar.columnconfigure(0, weight=1)
+        tk.Label(self.sidebar, text="SPORTSDESK", bg=SIDEBAR, fg=SIDEBAR_TEXT,
+                 font=(self.family, 17, "bold")).grid(row=0, column=0, sticky="w", padx=22, pady=(24, 0))
+        tk.Label(self.sidebar, text="EQUIPMENT MANAGER", bg=SIDEBAR, fg=SIDEBAR_MUTED,
+                 font=(self.family, 8, "bold")).grid(row=1, column=0, sticky="w", padx=22, pady=(0, 22))
+        tk.Label(self.sidebar, text="DBMS PROJECT | PYTHON + SQLITE", bg=SIDEBAR, fg=SIDEBAR_MUTED,
+                 font=(self.family, 8)).grid(row=99, column=0, sticky="w", padx=14, pady=16)
+        self.sidebar.rowconfigure(98, weight=1)
+
+        content = ttk.Frame(root, padding=(24, 16, 24, 12))
+        content.grid(row=0, column=1, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
+        self.title = ttk.Label(content, style="Title.TLabel")
+        self.title.grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ttk.Label(content, text="ABIN SHAJI THOMAS | URK24CS6007", style="Owner.TLabel").grid(row=0, column=1, sticky="e")
+        container = ttk.Frame(content)
+        container.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        status = tk.Frame(root, bg=WHITE, highlightthickness=1, highlightbackground=BORDER)
+        status.grid(row=1, column=0, columnspan=2, sticky="ew")
+        status.columnconfigure(1, weight=1)
+        tk.Label(status, text="Last SQL executed:", bg=WHITE, fg=TEXT,
+                 font=(self.family, 9, "bold")).grid(row=0, column=0, sticky="nw", padx=(14, 6), pady=7)
+        self.sql_label = tk.Label(status, text="(nothing yet)", bg=WHITE, fg=TEXT, font=("Consolas", 9),
+                                  anchor="w", justify="left")
+        self.sql_label.grid(row=0, column=1, sticky="ew", pady=7)
+        self.count_label = tk.Label(status, bg=WHITE, fg=MUTED, font=(self.family, 9))
+        self.count_label.grid(row=0, column=2, sticky="ne", padx=14, pady=7)
+        status.bind("<Configure>", lambda e: self.sql_label.configure(wraplength=max(300, e.width - 330)))
+
+        self.pages = {}
+        self.nav = {}
+        for key, page_class, args in self.page_list():
+            page = page_class(container, self, *args)
+            page.grid(row=0, column=0, sticky="nsew")
+            self.pages[key] = page
+            button = ttk.Button(self.sidebar, text=page.title, style="Nav.TButton",
+                                command=lambda k=key: self.show(k))
+            button.grid(row=len(self.nav) + 2, column=0, sticky="ew")
+            self.nav[key] = button
+        self.current = None
+        self.refresh_all()
+        self.show("dashboard")
+
+    # The screens in sidebar order
+    def page_list(self):
+        return [("dashboard", DashboardPage, ())]
+
+    # Switch to a screen, optionally with an empty form ready for a new record
+    def show(self, key, new=False):
+        self.current = key
+        page = self.pages[key]
+        page.tkraise()
+        self.title.configure(text=page.title)
+        for k, button in self.nav.items():
+            button.configure(style="NavActive.TButton" if k == key else "Nav.TButton")
+        if new and hasattr(page, "clear_form"):
+            page.clear_form()
+            page.first_field().focus_set()
+        self.update_status()
+
+    # Reload every screen and the status bar after a change
+    def refresh_all(self):
+        for page in self.pages.values():
+            page.refresh()
+        self.update_status()
+
+    # Show the last SQL statement and the record count of the current screen
+    def update_status(self):
+        if last_sql:
+            self.sql_label.configure(text=last_sql)
+        if self.current:
+            self.count_label.configure(text=str(self.pages[self.current].shown_count()) + " records shown")
+
+
 if __name__ == "__main__":
     init_db()
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
