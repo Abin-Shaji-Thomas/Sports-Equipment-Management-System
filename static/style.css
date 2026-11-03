@@ -1,0 +1,63 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+    color: #222;
+}
+
+header {
+    border-bottom: 3px solid #1a73e8;
+    margin-bottom: 15px;
+}
+
+h1 {
+    color: #1a73e8;
+    margin-bottom: 5px;
+}
+
+h2 {
+    color: #1a73e8;
+}
+
+.sql-box {
+    background: #eef4fd;
+    border: 1px solid #1a73e8;
+    padding: 8px;
+    margin-bottom: 15px;
+}
+
+table {
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+th, td {
+    border: 1px solid #999;
+    padding: 6px 10px;
+    text-align: left;
+}
+
+th {
+    background: #1a73e8;
+    color: white;
+}
+
+input, select, button {
+    padding: 5px;
+    margin: 2px;
+}
+
+button {
+    background: #1a73e8;
+    color: white;
+    border: none;
+    cursor: pointer;
+}
+
+form.inline {
+    display: inline;
+}
+
+form.edit label {
+    display: block;
+    margin: 6px 0;
+}
