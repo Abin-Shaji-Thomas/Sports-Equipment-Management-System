@@ -1,12 +1,34 @@
 import os
 import sqlite3
-from flask import Flask, render_template, request, redirect, url_for
+from datetime import date, datetime
 
-app = Flask(__name__)
 DB = "sports.db"
+CONDITIONS = ("Good", "Fair", "Poor", "Under Repair")
 last_sql = ""
 
+EQUIPMENT_QUERY = """
+SELECT equipment_id, name, category, total_quantity, issued_now,
+       total_quantity - issued_now AS available, condition,
+       CASE WHEN condition = 'Under Repair' THEN 'Under Repair'
+            WHEN total_quantity - issued_now <= 0 THEN 'All Issued'
+            ELSE 'Available' END AS status
+FROM (SELECT e.*,
+             (SELECT COALESCE(SUM(i.quantity), 0) FROM issue_record i
+              WHERE i.equipment_id = e.equipment_id AND i.return_date IS NULL) AS issued_now
+      FROM equipment e)
+"""
 
+ISSUE_QUERY = """
+SELECT i.issue_id, e.name, i.issued_to, i.quantity, i.issue_date, i.days_allowed,
+       date(i.issue_date, '+' || i.days_allowed || ' days') AS due_date, i.return_date,
+       CASE WHEN i.return_date IS NOT NULL THEN 'Returned'
+            WHEN date(i.issue_date, '+' || i.days_allowed || ' days') < date('now', 'localtime') THEN 'Overdue'
+            ELSE 'Issued' END AS status
+FROM issue_record i JOIN equipment e ON i.equipment_id = e.equipment_id
+"""
+
+
+# Open a connection with foreign keys turned on
 def get_db():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
@@ -14,6 +36,7 @@ def get_db():
     return conn
 
 
+# Create the database from schema.sql if it does not exist
 def init_db():
     if not os.path.exists(DB):
         conn = get_db()
@@ -22,6 +45,7 @@ def init_db():
         conn.close()
 
 
+# Format a value the way it would appear in an SQL statement
 def show_value(v):
     if v is None:
         return "NULL"
@@ -30,6 +54,7 @@ def show_value(v):
     return "'" + str(v).replace("'", "''") + "'"
 
 
+# Run a change statement and remember it with its values filled in
 def run(sql, params):
     global last_sql
     conn = get_db()
@@ -41,88 +66,130 @@ def run(sql, params):
     last_sql = sql
 
 
-# Main page: list both tables
-@app.route("/")
-def index():
+# Run a SELECT and return all rows
+def query(sql, params=()):
     conn = get_db()
-    equipment = conn.execute("SELECT * FROM equipment").fetchall()
-    issues = conn.execute(
-        "SELECT issue_record.*, equipment.name FROM issue_record "
-        "JOIN equipment ON issue_record.equipment_id = equipment.equipment_id"
-    ).fetchall()
+    rows = conn.execute(sql, params).fetchall()
     conn.close()
-    return render_template("index.html", equipment=equipment, issues=issues, last_sql=last_sql)
+    return rows
 
 
-# Add equipment
-@app.route("/equipment/add", methods=["POST"])
-def add_equipment():
-    f = request.form
-    run("INSERT INTO equipment (name, category, quantity, condition) VALUES (?, ?, ?, ?)",
-        (f["name"], f["category"], int(f["quantity"]), f["condition"]))
-    return redirect(url_for("index"))
+# All equipment with issued, available and status
+def fetch_equipment():
+    return query(EQUIPMENT_QUERY + " ORDER BY equipment_id")
 
 
-# Show edit form for equipment
-@app.route("/equipment/edit/<int:id>")
-def edit_equipment(id):
-    conn = get_db()
-    row = conn.execute("SELECT * FROM equipment WHERE equipment_id = ?", (id,)).fetchone()
-    conn.close()
-    return render_template("edit.html", table="equipment", row=row)
+# One equipment row with issued, available and status
+def get_equipment(equipment_id):
+    rows = query("SELECT * FROM (" + EQUIPMENT_QUERY + ") WHERE equipment_id = ?", (equipment_id,))
+    return rows[0] if rows else None
 
 
-# Update equipment
-@app.route("/equipment/update/<int:id>", methods=["POST"])
-def update_equipment(id):
-    f = request.form
-    run("UPDATE equipment SET name = ?, category = ?, quantity = ?, condition = ? WHERE equipment_id = ?",
-        (f["name"], f["category"], int(f["quantity"]), f["condition"], id))
-    return redirect(url_for("index"))
+# All issue records with due date and status
+def fetch_issues():
+    return query(ISSUE_QUERY + " ORDER BY i.issue_id")
 
 
-# Delete equipment
-@app.route("/equipment/delete/<int:id>", methods=["POST"])
-def delete_equipment(id):
-    run("DELETE FROM equipment WHERE equipment_id = ?", (id,))
-    return redirect(url_for("index"))
+# Totals for the summary line
+def fetch_summary():
+    equipment = fetch_equipment()
+    issues = fetch_issues()
+    total = sum(e["total_quantity"] for e in equipment)
+    issued = sum(e["issued_now"] for e in equipment)
+    overdue = sum(1 for i in issues if i["status"] == "Overdue")
+    return total, issued, overdue
 
 
-# Add issue record
-@app.route("/issue/add", methods=["POST"])
-def add_issue():
-    f = request.form
-    run("INSERT INTO issue_record (equipment_id, issued_to, issue_date, return_date) VALUES (?, ?, ?, ?)",
-        (int(f["equipment_id"]), f["issued_to"], f["issue_date"], f["return_date"] or None))
-    return redirect(url_for("index"))
+# Check a text field is not empty
+def require_text(value, field):
+    value = value.strip()
+    if not value:
+        raise ValueError(field + " cannot be empty.")
+    return value
 
 
-# Show edit form for issue record
-@app.route("/issue/edit/<int:id>")
-def edit_issue(id):
-    conn = get_db()
-    row = conn.execute("SELECT * FROM issue_record WHERE issue_id = ?", (id,)).fetchone()
-    equipment = conn.execute("SELECT equipment_id, name FROM equipment").fetchall()
-    conn.close()
-    return render_template("edit.html", table="issue", row=row, equipment=equipment)
+# Check a field is a whole number (positive, or zero if allowed)
+def require_int(value, field, allow_zero=False):
+    value = value.strip()
+    if not value.isdigit() or (int(value) == 0 and not allow_zero):
+        raise ValueError(field + " must be a " + ("whole number." if allow_zero else "positive whole number."))
+    return int(value)
 
 
-# Update issue record
-@app.route("/issue/update/<int:id>", methods=["POST"])
-def update_issue(id):
-    f = request.form
-    run("UPDATE issue_record SET equipment_id = ?, issued_to = ?, issue_date = ?, return_date = ? WHERE issue_id = ?",
-        (int(f["equipment_id"]), f["issued_to"], f["issue_date"], f["return_date"] or None, id))
-    return redirect(url_for("index"))
+# Check a date is in YYYY-MM-DD format
+def require_date(value, field):
+    value = value.strip()
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(field + " must be a valid date in YYYY-MM-DD format.")
+    return value
 
 
-# Delete issue record
-@app.route("/issue/delete/<int:id>", methods=["POST"])
-def delete_issue(id):
-    run("DELETE FROM issue_record WHERE issue_id = ?", (id,))
-    return redirect(url_for("index"))
+# Check the condition is one of the allowed values
+def require_condition(value):
+    if value not in CONDITIONS:
+        raise ValueError("Please choose a condition.")
+    return value
+
+
+# Add a new equipment item
+def add_equipment(name, category, total, condition):
+    name = require_text(name, "Name")
+    category = require_text(category, "Category")
+    total = require_int(total, "Total Quantity", allow_zero=True)
+    condition = require_condition(condition)
+    run("INSERT INTO equipment (name, category, total_quantity, condition) VALUES (?, ?, ?, ?)",
+        (name, category, total, condition))
+
+
+# Update an equipment item
+def update_equipment(equipment_id, name, category, total, condition):
+    name = require_text(name, "Name")
+    category = require_text(category, "Category")
+    total = require_int(total, "Total Quantity", allow_zero=True)
+    condition = require_condition(condition)
+    current = get_equipment(equipment_id)
+    if total < current["issued_now"]:
+        raise ValueError("Total quantity cannot be less than the " + str(current["issued_now"]) + " currently issued.")
+    run("UPDATE equipment SET name = ?, category = ?, total_quantity = ?, condition = ? WHERE equipment_id = ?",
+        (name, category, total, condition, equipment_id))
+
+
+# Delete an equipment item (its issue records are removed by cascade)
+def delete_equipment(equipment_id):
+    run("DELETE FROM equipment WHERE equipment_id = ?", (equipment_id,))
+
+
+# Issue equipment to a person
+def issue_equipment(equipment_id, issued_to, quantity, issue_date, days):
+    if equipment_id is None:
+        raise ValueError("Please choose an equipment item.")
+    issued_to = require_text(issued_to, "Issued To")
+    quantity = require_int(quantity, "Quantity")
+    days = require_int(days, "Days Allowed")
+    issue_date = require_date(issue_date, "Issue Date")
+    item = get_equipment(equipment_id)
+    if item["condition"] == "Under Repair":
+        raise ValueError(item["name"] + " is under repair and cannot be issued.")
+    if quantity > item["available"]:
+        raise ValueError("Only " + str(item["available"]) + " " + item["name"] + " available.")
+    run("INSERT INTO issue_record (equipment_id, issued_to, quantity, issue_date, days_allowed) VALUES (?, ?, ?, ?, ?)",
+        (equipment_id, issued_to, quantity, issue_date, days))
+
+
+# Set the return date of an issue record to today
+def mark_returned(issue_id):
+    row = query("SELECT return_date FROM issue_record WHERE issue_id = ?", (issue_id,))[0]
+    if row["return_date"] is not None:
+        raise ValueError("This record is already marked as returned.")
+    run("UPDATE issue_record SET return_date = ? WHERE issue_id = ?", (date.today().isoformat(), issue_id))
+
+
+# Delete an issue record
+def delete_issue(issue_id):
+    run("DELETE FROM issue_record WHERE issue_id = ?", (issue_id,))
 
 
 if __name__ == "__main__":
     init_db()
-    app.run(debug=True)
