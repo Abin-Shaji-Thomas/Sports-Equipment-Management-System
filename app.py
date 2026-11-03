@@ -599,6 +599,8 @@ class TablePage(ttk.Frame):
         self.toolbar_right.pack(side="right")
         ttk.Button(self.toolbar_right, text="Refresh", style="Secondary.TButton",
                    command=app.refresh_all).pack(side="right", padx=(8, 0))
+        ttk.Button(self.toolbar_right, text="Export CSV", command=self.export).pack(side="right", padx=(8, 0))
+        ttk.Button(self.toolbar_right, text="Import CSV", command=self.import_file).pack(side="right")
 
         frame, self.tree = make_table(self, TABLES[name]["columns"])
         frame.grid(row=1, column=0, sticky="nsew", padx=(0, 16))
@@ -744,6 +746,34 @@ class TablePage(ttk.Frame):
     def first_field(self):
         return next(iter(self.widgets.values()))
 
+    # Save the rows shown in the table to a CSV file
+    def export(self):
+        os.makedirs("exports", exist_ok=True)
+        path = filedialog.asksaveasfilename(title="Export CSV", initialdir=os.path.abspath("exports"),
+                                            initialfile=TABLES[self.name]["table"] + ".csv",
+                                            defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        try:
+            export_csv(path, TABLES[self.name]["columns"], self.shown)
+        except OSError as e:
+            messagebox.showwarning("Export CSV", "Could not write the file: " + str(e))
+            return
+        messagebox.showinfo("Export CSV", str(len(self.shown)) + " records exported to\n" + path)
+
+    # Insert the valid rows of a chosen CSV file and report the result
+    def import_file(self):
+        path = filedialog.askopenfilename(title="Import CSV", initialdir=os.path.abspath("sample_import"),
+                                          filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        imported, skipped, reason = import_csv(self.name, path)
+        self.app.refresh_all()
+        message = str(imported) + " imported, " + str(skipped) + " skipped"
+        if reason:
+            message += "\n\n" + reason
+        messagebox.showinfo("Import CSV", message)
+
 
 class IssuePage(TablePage):
     hint = "Select a row to mark it returned or delete it, or fill the fields to issue equipment."
@@ -774,6 +804,70 @@ class IssuePage(TablePage):
     def clear_form(self):
         super().clear_form()
         self.widgets["Issue Date"].insert(0, date.today().isoformat())
+
+
+class QueriesPage(ttk.Frame):
+    title = "Queries"
+
+    # Build the query picker, SQL text box and result table
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.queries = load_sample_queries()
+        self.rows = []
+        self.ran = False
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(3, weight=1)
+
+        toolbar = ttk.Frame(self)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.picker = ttk.Combobox(toolbar, state="readonly", width=80, values=[t for t, _ in self.queries])
+        self.picker.pack(side="left")
+        self.picker.bind("<<ComboboxSelected>>", lambda e: self.show_sql())
+        ttk.Button(toolbar, text="Run", command=self.run_query).pack(side="left", padx=(8, 0))
+
+        self.sql_text = tk.Text(self, height=9, font=("Consolas", 10), bg=WHITE, fg=TEXT, relief="flat",
+                                highlightthickness=1, highlightbackground=BORDER, highlightcolor=GREEN,
+                                selectbackground=SELECT, selectforeground=TEXT, padx=12, pady=10, wrap="word")
+        self.sql_text.grid(row=1, column=0, sticky="ew")
+        ttk.Label(self, text="Result", style="Section.TLabel").grid(row=2, column=0, sticky="w", pady=(16, 8))
+        frame, self.tree = make_table(self, ("Result",))
+        frame.grid(row=3, column=0, sticky="nsew")
+        self.picker.current(0)
+        self.show_sql()
+
+    # Show the SQL of the chosen query and clear old results
+    def show_sql(self):
+        self.sql_text.configure(state="normal")
+        self.sql_text.delete("1.0", "end")
+        self.sql_text.insert("1.0", self.queries[self.picker.current()][1])
+        self.sql_text.configure(state="disabled")
+        self.ran = False
+        self.rows = []
+        set_columns(self.tree, ("Result",))
+        fill_table(self.tree, [])
+        self.app.update_status()
+
+    # Run the chosen query and show its real results
+    def run_query(self):
+        try:
+            headings, self.rows = run_sample_query(self.queries[self.picker.current()][1])
+        except sqlite3.Error as e:
+            messagebox.showwarning("Query failed", str(e))
+            return
+        set_columns(self.tree, headings)
+        fill_table(self.tree, self.rows)
+        self.ran = True
+        self.app.update_status()
+
+    # Re-run the shown query so its results stay live
+    def refresh(self):
+        if self.ran:
+            self.run_query()
+
+    # Number of result rows shown
+    def shown_count(self):
+        return len(self.rows)
 
 
 class App:
@@ -829,6 +923,7 @@ class App:
 
         self.pages = {}
         self.nav = {}
+        self.current = None
         for key, page_class, args in self.page_list():
             page = page_class(container, self, *args)
             page.grid(row=0, column=0, sticky="nsew")
@@ -837,7 +932,6 @@ class App:
                                 command=lambda k=key: self.show(k))
             button.grid(row=len(self.nav) + 2, column=0, sticky="ew")
             self.nav[key] = button
-        self.current = None
         self.refresh_all()
         self.show("dashboard")
 
@@ -849,7 +943,8 @@ class App:
                 ("members", TablePage, ("members", "Members")),
                 ("issue", IssuePage, ()),
                 ("maintenance", TablePage, ("maintenance", "Maintenance")),
-                ("fines", TablePage, ("fines", "Fines"))]
+                ("fines", TablePage, ("fines", "Fines")),
+                ("queries", QueriesPage, ())]
 
     # Switch to a screen, optionally with an empty form ready for a new record
     def show(self, key, new=False):
